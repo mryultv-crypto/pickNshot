@@ -3,6 +3,7 @@ import streamlit as st
 import google.generativeai as genai
 from PIL import Image
 import io
+import traceback
 
 # --- [1] BCG & VOGUE 하이엔드 스타일링 ---
 st.set_page_config(page_title="Pick & Shot: Enterprise", page_icon="📸", layout="wide")
@@ -30,26 +31,80 @@ if 'user_db' not in st.session_state:
         "PREM-9999":  {"plan": "PREMIUM", "usage": 0, "limit": 300}
     }
 
-# --- [3] 핵심 엔진: 모델 자동 매칭 (404 원천 차단) ---
-def get_available_engine():
+# --- [3] 모델 자동 매칭 및 디버깅 ---
+def list_models_with_methods(api_key):
     try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
         genai.configure(api_key=api_key)
-        # SDK에서 반환하는 모델 이름은 'models/...' 형태일 수 있으므로 풀 네임을 사용
-        models = [m.name for m in genai.list_models() 
-                  if 'generateContent' in getattr(m, "supported_generation_methods", [])]
-        preferred = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro-vision', 'models/gemini-pro']
-        for target in preferred:
-            if target in models:
-                return target
-        return models[0] if models else None
-    except Exception:
-        return None
+        models = list(genai.list_models())
+        out = []
+        for m in models:
+            # SDK 객체에 따라 속성명 차이가 있을 수 있으므로 안전하게 접근
+            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_methods", None) or []
+            out.append({"name": getattr(m, "name", str(m)), "methods": list(methods)})
+        return out
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_available_engine(api_key):
+    try:
+        genai.configure(api_key=api_key)
+        models = list(genai.list_models())
+        # 안전하게 메서드 추출
+        model_info = []
+        for m in models:
+            name = getattr(m, "name", str(m))
+            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_methods", None) or []
+            methods_lower = [str(x).lower() for x in methods]
+            model_info.append((name, methods_lower))
+
+        # 우선순위 후보 (풀 네임 포함)
+        preferred = [
+            'models/gemini-1.5-flash', 'models/gemini-1.5-pro',
+            'models/gemini-pro-vision', 'models/gemini-pro',
+            'models/text-bison-001', 'models/chat-bison-001'
+        ]
+
+        # 1) preferred 중 실제 존재하고 생성 관련 메서드가 있는 모델 선택
+        for pref in preferred:
+            for name, methods in model_info:
+                if name == pref and any(('generate' in m or 'text' in m or 'chat' in m) for m in methods):
+                    return name, model_info
+
+        # 2) 리스트에서 생성 관련 메서드가 있는 첫 모델 반환
+        for name, methods in model_info:
+            if any(('generate' in m or 'text' in m or 'chat' in m) for m in methods):
+                return name, model_info
+
+        # 3) fallback: 아무 모델도 없으면 None 반환
+        return None, model_info
+    except Exception as e:
+        return None, [{"error": str(e)}]
 
 # --- [4] 메인 서비스 로직 ---
 def main():
+    # API 키 불러오기 (시크릿에 설정된 키 사용)
+    api_key = None
+    try:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+    except Exception:
+        api_key = None
+
     with st.sidebar:
         st.title("🎛️ Controller")
+
+        # 모델 디버깅 정보 표시
+        st.subheader("Available models")
+        if api_key:
+            lm = list_models_with_methods(api_key)
+            if isinstance(lm, dict) and lm.get("error"):
+                st.error("모델 목록 조회 오류: " + lm["error"])
+            else:
+                with st.expander("모델 목록 (클릭해서 펼치기)", expanded=False):
+                    for m in lm:
+                        st.write(f"- {m['name']}  —  methods: {m['methods']}")
+        else:
+            st.info("GOOGLE_API_KEY가 설정되어 있지 않습니다. .streamlit/secrets.toml 확인")
+
         if 'auth_user' not in st.session_state:
             key = st.text_input("License Key", type="password")
             if st.button("Login"):
@@ -62,12 +117,15 @@ def main():
 
         user = st.session_state.user_db[st.session_state.auth_user]
         st.subheader(f"💎 {user['plan']} Member")
-        st.progress(user['usage'] / user['limit'])
-        
-        # 현재 연결된 엔진 확인
-        engine = get_available_engine()
-        st.success(f"Engine: {engine}")
-        
+        st.progress(min(1.0, user['usage'] / max(1, user['limit'])))
+
+        # 현재 연결된 엔진 확인 (자동 매칭)
+        engine, model_info = get_available_engine(api_key) if api_key else (None, [])
+        if engine:
+            st.success(f"Engine: {engine}")
+        else:
+            st.warning("지원 가능한 생성 모델을 찾지 못했습니다. 사이드바의 모델 목록을 확인하세요.")
+
         if st.button("Logout"):
             del st.session_state.auth_user
             st.rerun()
@@ -84,25 +142,32 @@ def main():
     with col2:
         st.subheader("2. View")
         if file:
-            img = Image.open(file)
-            st.image(img, use_column_width=True)
+            try:
+                img_preview = Image.open(file)
+                st.image(img_preview, use_column_width=True)
+            except Exception:
+                st.text("이미지 미리보기에 실패했습니다.")
 
     if shot_btn and file:
-        engine = get_available_engine()
+        if not api_key:
+            st.error("GOOGLE_API_KEY가 설정되어 있지 않습니다.")
+            return
+
+        engine, model_info = get_available_engine(api_key)
         if not engine:
-            st.error("API Key 또는 라이브러리 설정 오류입니다.")
+            st.error("지원 가능한 모델이 없습니다. 사이드바의 모델 목록을 확인하세요.")
             return
 
         with st.status("🧠 BCG 전략팀 분석 중...", expanded=True) as status:
             try:
-                # 모델 초기화 (engine은 'models/...' 풀네임)
-                genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+                genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(engine)
 
-                # 간단한 이미지 메타정보를 프롬프트에 포함 (멀티모달 전송은 SDK 문서 참고 별도 구현)
+                # 이미지 기본 메타 정보 포함 (멀티모달 직접 전송은 SDK 문서 참고)
                 img = Image.open(file)
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
+                buf.seek(0)
                 size = img.size
                 mode = img.mode
 
@@ -118,20 +183,24 @@ Image metadata: size={size}, mode={mode}
 3. High-End Image Generation Prompt (English)
                 """
 
-                # 텍스트 요청으로 안전하게 처리 (멀티모달 전송 필요하면 SDK 문서에 따라 ImageInput 등 사용)
+                # 텍스트 생성 호출 (SDK/모델에 따라 generate_content 또는 다른 메서드가 필요할 수 있음)
+                # 대부분의 genai.GenerativeModel 인스턴스는 generate_content(prompt) 형태를 지원합니다.
                 response = model.generate_content(prompt)
 
-                # 사용량 카운트
                 st.session_state.user_db[st.session_state.auth_user]['usage'] += 1
                 status.update(label="✅ 전략 완성", state="complete")
-                
+
                 st.divider()
                 st.subheader("📋 Strategy Report")
-                # response.text 필드가 없을 경우 대비
                 output_text = getattr(response, "text", None) or getattr(response, "result", None) or str(response)
                 st.markdown(f'<div class="report-box">{output_text}</div>', unsafe_allow_html=True)
+
             except Exception as e:
+                # 상세 에러를 보여줘서 원인 파악에 도움을 줌 (404, 권한, 메서드 미지원 등)
+                tb = traceback.format_exc()
                 st.error(f"오류 발생: {str(e)}")
+                with st.expander("상세 에러 로그 (개발용)"):
+                    st.text(tb)
 
 if __name__ == "__main__":
     main()
