@@ -38,7 +38,7 @@ def configure_genai():
 
 # --- [3] 분석 로직 (하이브리드) ---
 def analyze_hybrid(product_img, model_img, vibe):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
     
     base_prompt = f"""
     당신은 세계 최고의 광고 디렉터입니다. 
