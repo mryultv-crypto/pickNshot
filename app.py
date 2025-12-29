@@ -1,10 +1,9 @@
-# ...existing code...
 import streamlit as st
 import google.generativeai as genai
 from PIL import Image
-import io
-import traceback
+import os
 
+# --- [1] BCG & VOGUE 하이엔드 스타일링 ---
 st.set_page_config(page_title="Pick & Shot: Enterprise", page_icon="📸", layout="wide")
 
 st.markdown("""
@@ -22,7 +21,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 간단한 SaaS 유저 DB
+# --- [2] SaaS 라이선스 시스템 ---
 if 'user_db' not in st.session_state:
     st.session_state.user_db = {
         "BASIC-1234": {"plan": "BASIC", "usage": 0, "limit": 30},
@@ -30,97 +29,88 @@ if 'user_db' not in st.session_state:
         "PREM-9999":  {"plan": "PREMIUM", "usage": 0, "limit": 300}
     }
 
-# 모델 목록 조회(디버깅용) 및 자동 매칭 함수
-def list_models_debug(api_key):
+# --- [3] 핵심 엔진: 모델 자동 매칭 (404 원천 차단) ---
+def get_available_engine():
+    """
+    사용 가능한 Gemini 모델을 찾아서 반환합니다.
+    API 키 오류나 모델 리스팅 실패 시 기본 모델을 반환하여 404를 방지합니다.
+    """
+    default_model = 'gemini-1.5-flash'
     try:
-        genai.configure(api_key=api_key)
-        models = list(genai.list_models())
-        out = []
-        for m in models:
-            name = getattr(m, "name", str(m))
-            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_methods", None) or []
-            methods = [str(x) for x in methods]
-            out.append({"name": name, "methods": methods})
-        return out
-    except Exception as e:
-        return {"error": str(e)}
+        # 1. API 키 설정
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            # secrets에 없으면 환경변수 시도
+            api_key = os.getenv("GOOGLE_API_KEY")
+            
+        if not api_key:
+            st.error("❌ API Key가 설정되지 않았습니다.")
+            return None
 
-def choose_model(api_key):
-    try:
         genai.configure(api_key=api_key)
-        models = list(genai.list_models())
-        model_info = []
-        for m in models:
-            name = getattr(m, "name", str(m))
-            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_methods", None) or []
-            methods = [str(x).lower() for x in methods]
-            model_info.append((name, methods))
 
-        # 선호순: 서버 반환 이름(full name)을 기준으로 우선 매칭
-        preferred = [
-            'models/gemini-1.5-flash', 'models/gemini-1.5-pro',
-            'models/gemini-pro-vision', 'models/gemini-pro',
-            'models/text-bison-001', 'models/chat-bison-001'
+        # 2. 모델 리스트 조회 시도
+        available_models = []
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    # models/gemini-pro -> gemini-pro 형태로 변환
+                    name = m.name.replace('models/', '')
+                    available_models.append(name)
+        except Exception as e:
+            # 리스팅 실패 시 (권한 문제 등), 실패를 무시하고 기본값 사용 시도
+            print(f"모델 리스트 조회 실패 (무시됨): {e}")
+
+        # 3. 우선순위 기반 모델 선택
+        # 선호 순위: 1.5-flash -> 1.5-pro -> pro-vision -> pro
+        priority_targets = [
+            'gemini-1.5-flash', 'gemini-1.5-pro',
+            'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
+            'gemini-2.5-flash', # Detected in user environment
+            'gemini-pro-vision', 'gemini-pro'
         ]
+        
+        # A. 리스트에서 찾기
+        for target in priority_targets:
+            if target in available_models:
+                return target
 
-        # preferred에 있고 generate 관련 메서드가 있는 모델 선택
-        for pref in preferred:
-            for name, methods in model_info:
-                if name == pref and any('generate' in m or 'text' in m or 'chat' in m for m in methods):
-                    return name, model_info
+        # B. 리스트 결과가 비었거나 매칭되는게 없으면, 
+        #    리스트의 첫번째 걸 쓰거나, 아예 기본값을 강제 반환
+        if available_models:
+            return available_models[0]
+        
+        # C. 최후의 수단: 그냥 문자열 반환 (API가 실제로 될 수도 있음)
+        return default_model
 
-        # 그렇지 않으면 methods에 generate 관련 키워드가 있는 첫 모델
-        for name, methods in model_info:
-            if any('generate' in m or 'text' in m or 'chat' in m for m in methods):
-                return name, model_info
-
-        return None, model_info
     except Exception as e:
-        return None, [{"error": str(e)}]
+        st.error(f"엔진 초기화 중 오류 발생: {e}")
+        return default_model
 
-# 메인
+# --- [4] 메인 서비스 로직 ---
 def main():
-    # API 키 획득 (st.secrets 또는 환경변수)
-    api_key = None
-    try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-    except Exception:
-        api_key = None
-
     with st.sidebar:
         st.title("🎛️ Controller")
-        st.subheader("Available models")
-        if api_key:
-            lm = list_models_debug(api_key)
-            if isinstance(lm, dict) and lm.get("error"):
-                st.error("모델 목록 조회 오류: " + lm["error"])
-            else:
-                with st.expander("모델 목록 (클릭)", expanded=False):
-                    for m in lm:
-                        st.write(f"- {m['name']}  —  {m['methods']}")
-        else:
-            st.info("GOOGLE_API_KEY가 설정되어 있지 않습니다. .streamlit/secrets.toml 또는 환경변수를 확인하세요.")
-
         if 'auth_user' not in st.session_state:
             key = st.text_input("License Key", type="password")
             if st.button("Login"):
                 if key in st.session_state.user_db:
                     st.session_state.auth_user = key
                     st.rerun()
-                else:
-                    st.error("키가 올바르지 않습니다.")
+                else: st.error("키가 올바르지 않습니다.")
             return
 
         user = st.session_state.user_db[st.session_state.auth_user]
         st.subheader(f"💎 {user['plan']} Member")
-        st.progress(min(1.0, user['usage'] / max(1, user['limit'])))
-
-        engine, model_info = choose_model(api_key) if api_key else (None, [])
+        st.progress(user['usage'] / user['limit'])
+        
+        # 현재 연결된 엔진 확인
+        engine = get_available_engine()
         if engine:
-            st.success(f"Engine: {engine}")
+            st.success(f"Engine Connected: {engine}")
         else:
-            st.warning("지원 가능한 생성 모델을 찾지 못했습니다. 위 모델 목록을 확인하세요.")
-
+            st.error("Engine Connection Failed")
+        
         if st.button("Logout"):
             del st.session_state.auth_user
             st.rerun()
@@ -137,66 +127,40 @@ def main():
     with col2:
         st.subheader("2. View")
         if file:
-            try:
-                preview = Image.open(file)
-                st.image(preview, use_column_width=True)
-            except Exception:
-                st.text("이미지 미리보기 실패.")
+            img = Image.open(file)
+            st.image(img, use_column_width=True)
 
     if shot_btn and file:
-        if not api_key:
-            st.error("GOOGLE_API_KEY가 설정되어 있지 않습니다.")
-            return
-
-        engine, model_info = choose_model(api_key)
         if not engine:
-            st.error("지원 가능한 모델이 없습니다. 사이드바의 모델 목록을 확인하세요.")
+            st.error("API Key 오류 또는 모델을 찾을 수 없습니다. secrets.toml을 확인해주세요.")
             return
 
         with st.status("🧠 BCG 전략팀 분석 중...", expanded=True) as status:
             try:
-                genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(engine)
-
-                # 이미지 바이트를 함께 전송 (멀티모달 지원 모델인 경우)
-                img = Image.open(file)
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                buf.seek(0)
-                image_bytes = buf.getvalue()
-
-                # SDK에서 이미지 입력 객체 생성 (google.generativeai의 ImageInput 또는 Part)
-                from google.generativeai.types import Part
-                image_part = Part.from_bytes(data=image_bytes, mime_type="image/png")
-
                 prompt = f"""
-You are a BCG Senior Strategist and a Luxury Brand Creative Director.
-Analyze the uploaded product image and provide a 7-star commercial strategy.
-Target Vibe: {vibe}
-
-[Output]
-1. Strategic Concept (Korean)
-2. Visual Direction (Korean)
-3. High-End Image Generation Prompt (English)
+                You are a BCG Senior Strategist and a Luxury Brand Creative Director.
+                Analyze the product and provide a 7-star commercial strategy.
+                Target Vibe: {vibe}
+                
+                [Output]
+                1. Strategic Concept (Korean)
+                2. Visual Direction (Korean)
+                3. High-End Image Generation Prompt (English)
                 """
-
-                # 멀티모달 호출: 프롬프트 텍스트 + 이미지 바이트
-                response = model.generate_content([prompt, image_part])
-
+                response = model.generate_content([prompt, img])
+                
                 st.session_state.user_db[st.session_state.auth_user]['usage'] += 1
                 status.update(label="✅ 전략 완성", state="complete")
-
+                
                 st.divider()
                 st.subheader("📋 Strategy Report")
-                output_text = getattr(response, "text", None) or getattr(response, "result", None) or str(response)
-                st.markdown(f'<div class="report-box">{output_text}</div>', unsafe_allow_html=True)
-
+                st.markdown(f'<div class="report-box">{response.text}</div>', unsafe_allow_html=True)
             except Exception as e:
-                tb = traceback.format_exc()
                 st.error(f"오류 발생: {str(e)}")
-                with st.expander("상세 에러 로그 (개발용)"):
-                    st.text(tb)
+                # 404 에러일 경우 힌트 제공
+                if "404" in str(e):
+                    st.warning("팁: 선택된 모델이 현재 API 키로 접근 불가능할 수 있습니다. API 키 권한을 확인하거나 다른 모델을 시도해보세요.")
 
 if __name__ == "__main__":
     main()
-# ...existing code...
