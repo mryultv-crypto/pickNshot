@@ -158,28 +158,30 @@ def main():
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(engine)
 
-                # 이미지 메타 포함 텍스트 프롬프트 (멀티모달 전송은 SDK 문서 참조)
+                # 이미지 바이트를 함께 전송 (멀티모달 지원 모델인 경우)
                 img = Image.open(file)
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
                 buf.seek(0)
-                size = img.size
-                mode = img.mode
+                image_bytes = buf.getvalue()
+
+                # SDK에서 이미지 입력 객체 생성 (google.generativeai의 ImageInput 또는 Part)
+                from google.generativeai.types import Part
+                image_part = Part.from_bytes(data=image_bytes, mime_type="image/png")
 
                 prompt = f"""
 You are a BCG Senior Strategist and a Luxury Brand Creative Director.
 Analyze the uploaded product image and provide a 7-star commercial strategy.
 Target Vibe: {vibe}
 
-Image metadata: size={size}, mode={mode}
 [Output]
 1. Strategic Concept (Korean)
 2. Visual Direction (Korean)
 3. High-End Image Generation Prompt (English)
                 """
 
-                # 텍스트 호출 (선택된 모델이 generateContent를 지원하면 정상동작)
-                response = model.generate_content(prompt)
+                # 멀티모달 호출: 프롬프트 텍스트 + 이미지 바이트
+                response = model.generate_content([prompt, image_part])
 
                 st.session_state.user_db[st.session_state.auth_user]['usage'] += 1
                 status.update(label="✅ 전략 완성", state="complete")
