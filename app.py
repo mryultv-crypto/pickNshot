@@ -2,116 +2,185 @@ import streamlit as st
 import google.generativeai as genai
 from PIL import Image
 import os
+from datetime import datetime
 import time
 
-# --- [1] 페이지 설정 ---
-st.set_page_config(page_title="Pick & Shot: Pro Studio", page_icon="📸", layout="wide")
+# --- [1] BCG급 기획 & 보그급 비주얼 설정 ---
+st.set_page_config(page_title="Pick & Shot: Enterprise Edition", page_icon="📸", layout="wide")
 
+# 스타일링: 럭셔리 다크 모드 & 가독성 최적화
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    section[data-testid="stSidebar"] { background-color: #1c1e24; }
-    .stButton>button {
-        width: 100%; background-color: #FF4B4B; color: white; 
-        border-radius: 8px; height: 55px; font-weight: 800; font-size: 18px; border: none;
+    .main { background-color: #0e1117; }
+    div.stButton > button {
+        width: 100%; border-radius: 8px; height: 55px; font-weight: 800; font-size: 18px;
+        background: linear-gradient(90deg, #FF4B4B 0%, #FF9966 100%); color: white; border: none;
+        box-shadow: 0 4px 15px rgba(255, 75, 75, 0.3); transition: all 0.3s ease;
     }
-    .stButton>button:hover { background-color: #FF2B2B; color: white; }
+    div.stButton > button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(255, 75, 75, 0.5); }
     .report-box {
-        background-color: #262730; padding: 25px; border-radius: 10px; 
-        border-left: 5px solid #FF4B4B; margin-bottom: 20px; line-height: 1.6;
+        background-color: #1E1E1E; padding: 25px; border-radius: 12px; 
+        border: 1px solid #333; margin-bottom: 20px;
+    }
+    .badge {
+        background-color: #333; color: #eee; padding: 4px 8px; border-radius: 4px; font-size: 0.8em;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- [2] API 설정 ---
-def configure_genai():
+# --- [2] 데이터베이스 (Mock DB) ---
+if 'user_db' not in st.session_state:
+    st.session_state.user_db = {
+        "BASIC-1234": {"plan": "BASIC", "usage": 0, "limit": 30, "last_date": ""},
+        "PRO-5678":   {"plan": "PRO",   "usage": 0, "limit": 100, "last_date": ""},
+        "PREM-9999":  {"plan": "PREMIUM", "usage": 0, "limit": 300, "last_date": ""}
+    }
+
+# --- [3] 핵심 로직: BCG 전략 + 천재 디버깅 ---
+def configure_google_api():
+    """API 키 로드 및 검증"""
     try:
-        api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            st.error("🚨 API Key가 없습니다. Secrets 설정을 확인하세요.")
-            return False
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key: return False
         genai.configure(api_key=api_key)
         return True
-    except Exception as e:
-        st.error(f"⚠️ 설정 오류: {str(e)}")
+    except:
         return False
 
-# --- [3] 분석 로직 (하이브리드) ---
-def analyze_hybrid(product_img, model_img, vibe):
-    model = genai.GenerativeModel('gemini-pro')
-    
-    base_prompt = f"""
-    당신은 세계 최고의 광고 디렉터입니다. 
-    이미지를 분석해 '{vibe}' 컨셉의 기획안과 프롬프트를 작성하세요.
-    [필수] 1. 상품의 로고/재질 변형 금지. 2. 조명/앵글의 전문적 묘사.
+def get_gemini_response(content, vibe):
     """
-
-    if model_img: 
-        specific = " [합성] 모델 이미지의 인물 특징을 유지하며 상품을 착용/사용하는 컷 연출."
-        content = [base_prompt + specific, product_img, model_img]
-    else: 
-        specific = " [가상 캐스팅] 모델 사진이 없습니다. 상품과 분위기에 딱 맞는 모델을 AI가 추천하여 묘사하세요."
-        content = [base_prompt + specific, product_img]
-
-    instruction = """
-    \n출력 형식:
-    PART 1. [기획안] (한글): 컨셉, 모델 스타일링, 조명 세팅
-    PART 2. [프롬프트] (영어): 복사 가능한 Midjourney용 텍스트만 (설명 제외)
+    [천재 디버깅 로직]
+    1순위: 최신 1.5 Flash 모델 시도
+    2순위: 실패 시 안정적인 Pro Vision 모델로 자동 전환
+    """
+    system_instruction = f"""
+    You are the Creative Director of a top-tier global advertising agency (like Ogilvy or BBDO).
+    Your goal is to analyze the product image and create a 'High-End Visual Strategy'.
+    
+    Current Concept Vibe: {vibe}
+    
+    [OUTPUT FORMAT]
+    1. **Creative Concept (Korean):** - Define the core message and tone.
+       - Describe the target audience and psychological trigger.
+    
+    2. **Visual Direction (Korean):**
+       - Lighting (e.g., Rembrandt, Butterfly, Soft/Hard).
+       - Color Palette (Hex codes or descriptions).
+       - Camera Angle & Composition (Rule of thirds, Low angle, etc.).
+       
+    3. **Generative AI Prompt (English - STRICTLY for DALL-E 3 / Midjourney):**
+       - Create a highly detailed, descriptive prompt.
+       - Include: Subject details, Environment, Lighting, Camera lens (e.g., 85mm f1.8), Film stock (e.g., Kodak Portra 400), and Style modifiers (e.g., 8k, photorealistic, cinematic lighting).
+       - DO NOT include explanatory text in this section, just the prompt.
     """
     
-    if isinstance(content[0], str): content[0] += instruction
-
+    # 입력 데이터 포맷팅 (텍스트 + 이미지)
+    final_content = [system_instruction, content[0]] # [프롬프트, 이미지]
+    
+    # 1차 시도: 최신 모델 (Gemini 1.5 Flash)
     try:
-        response = model.generate_content(content)
-        return response.text
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(final_content)
+        return response.text, "Gemini 1.5 Flash (Latest)"
     except Exception as e:
-        return f"Error: {str(e)}"
+        # 2차 시도: 안정형 모델 (Gemini Pro Vision) - 404 오류 시 여기로 넘어옴
+        try:
+            model = genai.GenerativeModel('gemini-pro-vision')
+            response = model.generate_content(final_content)
+            return response.text, "Gemini Pro Vision (Stable)"
+        except Exception as e2:
+            return f"Error: 모든 AI 모델 연결 실패. API 키를 확인하거나 잠시 후 다시 시도하세요.\n({str(e2)})", "Error"
 
-# --- [4] 메인 UI ---
+# --- [4] 메인 UI (SaaS 스타일) ---
 def main():
+    # 사이드바: 로그인 및 상태창
     with st.sidebar:
-        st.title("Pick & Shot 📸")
-        st.caption("Pro Edition")
+        st.title("🎛️ Controller")
         
-        st.header("1. Upload")
-        p_file = st.file_uploader("📦 상품 (필수)", type=["jpg","png","webp"])
-        st.markdown("---")
-        m_file = st.file_uploader("bust_in_silhouette: 모델 (선택)", type=["jpg","png","webp"])
+        if 'auth_user' not in st.session_state:
+            input_key = st.text_input("License Key", type="password")
+            if st.button("Login"):
+                if input_key in st.session_state.user_db:
+                    st.session_state['auth_user'] = input_key
+                    st.success("Access Granted")
+                    st.rerun()
+                else:
+                    st.error("Invalid Key")
+            st.info("Demo Keys: BASIC-1234, PRO-5678")
+            return
         
-        st.header("2. Vibe")
-        vibe = st.selectbox("분위기", ["Luxury Studio", "Cinematic Film", "Urban Street", "Nature Sunlight"])
+        # 로그인 후 상태창
+        user = st.session_state.user_db[st.session_state['auth_user']]
+        usage_percent = (user['usage'] / user['limit'])
         
-        st.markdown("---")
-        btn = st.button("✨ 생성하기")
+        st.markdown(f"### {user['plan']} Member")
+        st.progress(usage_percent)
+        st.caption(f"Usage: {user['usage']} / {user['limit']} shots")
+        
+        if st.button("Logout"):
+            del st.session_state['auth_user']
+            st.rerun()
 
-    st.markdown("### 🎞️ Preview")
-    c1, c2 = st.columns(2)
-    p_img, m_img = None, None
+    # 메인 화면
+    st.title("Pick & Shot 📸 : Enterprise")
+    st.markdown("##### The Ultimate AI Commercial Photography Studio")
+    
+    col1, col2 = st.columns([1, 1.2])
+    
+    with col1:
+        st.markdown("### 1. Pick (Material)")
+        p_file = st.file_uploader("Upload Product Image", type=['png','jpg','jpeg'])
+        vibe = st.selectbox("Select Vibe", 
+                           ["Luxury Minimal (Hermes Style)", 
+                            "Neon Cyberpunk (Tech Style)", 
+                            "Natural Sunlight (Aesop Style)", 
+                            "Cinematic Noir (Movie Style)"])
+        
+        generate_btn = st.button("🚀 Shot (Generate)")
 
-    with c1:
-        if p_file: 
-            p_img = Image.open(p_file)
-            st.image(p_img, caption="Product")
-        else: st.info("👈 상품 필수")
-
-    with c2:
-        if m_file:
-            m_img = Image.open(m_file)
-            st.image(m_img, caption="Model")
+    with col2:
+        st.markdown("### 2. Preview")
+        if p_file:
+            st.image(p_file, caption="Original Product", use_column_width=True)
         else:
-            st.markdown("<div style='padding:40px; border:2px dashed #555; text-align:center; color:#888;'>모델 없음<br>(AI 자동 추천)</div>", unsafe_allow_html=True)
+            st.info("좌측에서 상품 이미지를 업로드해주세요.")
 
-    if btn:
-        if not p_file: st.warning("상품 이미지를 넣어주세요!")
-        elif configure_genai():
-            with st.spinner("AI가 분석 중입니다..."):
-                res = analyze_hybrid(p_img, m_img, vibe)
-                st.session_state['res'] = res
-
-    if 'res' in st.session_state:
-        st.markdown("---")
-        st.markdown(f'<div class="report-box">{st.session_state["res"]}</div>', unsafe_allow_html=True)
-        st.code(st.session_state["res"], language="text")
+    # 실행 로직
+    if generate_btn and p_file:
+        if user['usage'] >= user['limit']:
+            st.error("🚫 일일 한도를 초과했습니다. 플랜을 업그레이드하세요.")
+        elif configure_google_api():
+            # UI: 진행바 및 상태 메시지
+            status_box = st.status("📸 스튜디오 세팅 중...", expanded=True)
+            p_img = Image.open(p_file)
+            
+            # Step 1: AI 분석 (BCG Strategy)
+            status_box.write("🧠 1. 상품 분석 및 비주얼 전략 수립 중 (Creative Director Mode)...")
+            result_text, model_used = get_gemini_response([p_img], vibe)
+            
+            if "Error" in model_used:
+                status_box.update(label="🚨 오류 발생", state="error")
+                st.error(result_text)
+            else:
+                # Step 2: 결과 출력
+                status_box.write(f"✅ 분석 완료! (Used Model: {model_used})")
+                status_box.update(label="✨ 작업 완료!", state="complete")
+                
+                # 사용량 차감
+                st.session_state.user_db[st.session_state['auth_user']]['usage'] += 1
+                
+                # 결과 리포트
+                st.divider()
+                st.subheader("📋 Creative Strategy Report")
+                st.markdown(f'<div class="report-box">{result_text}</div>', unsafe_allow_html=True)
+                
+                # 프롬프트 추출 (마지막 문단이 프롬프트일 확률이 높음)
+                st.subheader("🎨 Image Generation Prompt")
+                st.info("아래 텍스트를 복사하여 DALL-E 3 또는 Midjourney에 붙여넣으세요. (자동 생성 기능 준비 중)")
+                st.code(result_text.split("Generative AI Prompt")[-1], language='english')
+                
+        else:
+            st.error("API Key 설정 오류. secrets.toml을 확인하세요.")
 
 if __name__ == "__main__":
     main()
